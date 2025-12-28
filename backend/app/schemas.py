@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Literal, Optional
 from datetime import date
 from typing import List
+from typing import Literal
 
 class RegisterIn(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
@@ -46,3 +47,15 @@ class CompleteProfileIn(BaseModel):
     target_language_ids: List[int]
 
     interest_ids: List[int] = []
+
+class AiAssessmentStartIn(BaseModel):
+    user_id: int
+    language_id: int
+
+class AiAssessmentAnswerIn(BaseModel):
+    session_id: int
+    choice: Literal["A","B","C","D"]
+
+class AiAssessmentWritingIn(BaseModel):
+    session_id: int
+    text: str

@@ -16,6 +16,14 @@ from .schemas import (
 from .security import hash_password, verify_password, create_access_token, generate_otp, otp_hash
 from .emailer import send_otp_email
 
+import json
+from .models_assessment import AssessmentSession, AssessmentItem
+from .cefr import harder, easier, writing_score_to_cefr
+from .ai_test import make_mcq, grade_mcq, make_writing_prompt, grade_writing
+from .schemas import AiAssessmentStartIn, AiAssessmentAnswerIn, AiAssessmentWritingIn
+from .models import Language
+
+
 app = FastAPI(title="Fluentz API")
 
 OTP_EXPIRE_MINUTES = 10
@@ -230,3 +238,200 @@ def list_languages(db: Session = Depends(get_db)):
 def list_interests(db: Session = Depends(get_db)):
     rows = db.execute(select(Interest).order_by(Interest.name)).scalars().all()
     return [{"id": int(r.id), "name": r.name} for r in rows]
+
+MAX_CORE_QUESTIONS = 8
+
+@app.post("/assessment/ai/start")
+def ai_assessment_start(payload: AiAssessmentStartIn, db: Session = Depends(get_db)):
+    user = db.execute(select(User).where(User.id == payload.user_id)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.onboarding_status != "verified":
+        raise HTTPException(400, "User must be verified first")
+
+    lang = db.execute(select(Language).where(Language.id == payload.language_id)).scalar_one_or_none()
+    if not lang:
+        raise HTTPException(400, "Invalid language_id")
+
+    s = AssessmentSession(user_id=user.id, language_id=lang.id, status="in_progress", estimated_level="B1", step=0)
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+
+    # create step 1 MCQ at estimated_level
+    q = make_mcq(lang.name, s.estimated_level)
+    item = AssessmentItem(
+        session_id=s.id,
+        step=1,
+        item_type="mcq",
+        target_cefr=s.estimated_level,
+        prompt_text=q["prompt"],
+        options_json=json.dumps(q["options"]),
+        correct_option=q["correct"]
+    )
+    db.add(item)
+    s.step = 1
+    db.commit()
+
+    return {
+        "session_id": int(s.id),
+        "step": 1,
+        "target_cefr": s.estimated_level,
+        "type": "mcq",
+        "prompt": item.prompt_text,
+        "options": json.loads(item.options_json),
+    }
+
+
+@app.post("/assessment/ai/answer-mcq")
+def ai_assessment_answer(payload: AiAssessmentAnswerIn, db: Session = Depends(get_db)):
+    s = db.execute(select(AssessmentSession).where(AssessmentSession.id == payload.session_id)).scalar_one_or_none()
+    if not s or s.status != "in_progress":
+        raise HTTPException(400, "Invalid session")
+
+    lang = db.execute(select(Language).where(Language.id == s.language_id)).scalar_one()
+
+    item = db.execute(
+        select(AssessmentItem).where(
+            AssessmentItem.session_id == s.id,
+            AssessmentItem.step == s.step
+        )
+    ).scalar_one_or_none()
+
+    if not item or item.item_type != "mcq":
+        raise HTTPException(400, "No current MCQ item")
+
+    # Grade MCQ
+    q_options = json.loads(item.options_json or "{}")
+    # explanation comes from the generator; we stored none, so we’ll keep short feedback
+    correct = (item.correct_option or "").strip()
+
+    # quick AI-free feedback for MVP (you can improve later)
+    is_correct = payload.choice == correct
+    score = 10 if is_correct else 0
+    feedback = "Correct." if is_correct else f"Incorrect. Correct answer is {correct}."
+
+    item.user_answer = payload.choice
+    item.score = score
+    item.feedback = feedback
+    item.answered_at = datetime.utcnow()
+
+    # Update estimated level based on performance
+    if score == 10:
+        s.estimated_level = harder(s.estimated_level)
+    else:
+        s.estimated_level = easier(s.estimated_level)
+
+    next_step = s.step + 1
+
+    # If finished core, move to writing
+    if next_step > MAX_CORE_QUESTIONS:
+        s.status = "awaiting_writing"
+        db.commit()
+
+        wp = make_writing_prompt(lang.name, s.estimated_level)
+        writing_item = AssessmentItem(
+            session_id=s.id,
+            step=9,
+            item_type="writing",
+            target_cefr=s.estimated_level,
+            prompt_text=wp["prompt"],
+            options_json=json.dumps({"min_words": wp["min_words"], "max_words": wp["max_words"]})
+        )
+        db.add(writing_item)
+        db.commit()
+
+        return {
+            "done_core": True,
+            "status": s.status,
+            "estimated_level": s.estimated_level,
+            "type": "writing",
+            "prompt": writing_item.prompt_text,
+            "limits": json.loads(writing_item.options_json),
+            "prev_feedback": item.feedback
+        }
+
+    # Otherwise generate next MCQ
+    q = make_mcq(lang.name, s.estimated_level)
+    next_item = AssessmentItem(
+        session_id=s.id,
+        step=next_step,
+        item_type="mcq",
+        target_cefr=s.estimated_level,
+        prompt_text=q["prompt"],
+        options_json=json.dumps(q["options"]),
+        correct_option=q["correct"]
+    )
+    db.add(next_item)
+    s.step = next_step
+    db.commit()
+
+    return {
+        "done_core": False,
+        "step": next_step,
+        "target_cefr": s.estimated_level,
+        "type": "mcq",
+        "prompt": next_item.prompt_text,
+        "options": json.loads(next_item.options_json),
+        "prev_feedback": item.feedback
+    }
+
+
+@app.post("/assessment/ai/submit-writing")
+def ai_assessment_submit_writing(payload: AiAssessmentWritingIn, db: Session = Depends(get_db)):
+    s = db.execute(select(AssessmentSession).where(AssessmentSession.id == payload.session_id)).scalar_one_or_none()
+    if not s or s.status != "awaiting_writing":
+        raise HTTPException(400, "Session not awaiting writing")
+
+    lang = db.execute(select(Language).where(Language.id == s.language_id)).scalar_one()
+
+    writing_item = db.execute(
+        select(AssessmentItem).where(
+            AssessmentItem.session_id == s.id,
+            AssessmentItem.step == 9,
+            AssessmentItem.item_type == "writing"
+        )
+    ).scalar_one_or_none()
+
+    if not writing_item:
+        raise HTTPException(400, "Writing task not found")
+
+    g = grade_writing(lang.name, s.estimated_level, writing_item.prompt_text, payload.text)
+
+    writing_item.user_answer = payload.text
+    writing_item.score = int(g["score"])
+    writing_item.feedback = g.get("feedback", "")
+    writing_item.answered_at = datetime.utcnow()
+
+    writing_level = writing_score_to_cefr(int(g["score"]))
+
+    # Final CEFR = MIN(core estimate, writing)
+    cefr_order = ["A1","A2","B1","B2","C1","C2"]
+    final_level = s.estimated_level
+    if cefr_order.index(writing_level) < cefr_order.index(final_level):
+        final_level = writing_level
+
+    # Save final result into your existing language_assessments table
+    db.add(LanguageAssessment(
+        user_id=s.user_id,
+        language_id=s.language_id,
+        level="beginner" if final_level in ("A1","A2") else ("intermediate" if final_level in ("B1","B2") else "advanced"),
+        score=int(g["score"])  # keep for now (0..15); we can normalize later
+    ))
+
+    user = db.execute(select(User).where(User.id == s.user_id)).scalar_one()
+    user.onboarding_status = "assessed"
+
+    s.status = "completed"
+    s.completed_at = datetime.utcnow()
+
+    db.commit()
+
+    return {
+        "message": "Assessment completed",
+        "core_estimate": s.estimated_level,
+        "writing_score": int(g["score"]),
+        "writing_level": writing_level,
+        "final_cefr": final_level,
+        "user_status": user.onboarding_status
+    }
