@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import '../theme/fluentz_colors.dart';
 import 'otp_screen.dart';
+import '../widgets/auth_shell.dart';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import '../widgets/auth_feedback.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -33,214 +38,213 @@ class _RegisterScreenState extends State<RegisterScreen> {
     required IconData icon,
     Widget? suffix,
   }) {
-    return InputDecoration(
-      labelText: label,
-      prefixIcon: Icon(icon, color: FluentzColors.navy.withOpacity(0.75)),
-      suffixIcon: suffix,
-      filled: true,
-      fillColor: Colors.white,
-      labelStyle: TextStyle(color: FluentzColors.navy.withOpacity(0.75)),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
-        borderSide: BorderSide.none,
-      ),
-    );
+return InputDecoration(
+  labelText: label,
+  prefixIcon: Icon(icon, color: FluentzColors.navy.withOpacity(0.75)),
+  suffixIcon: suffix,
+  filled: true,
+  fillColor: const Color(0xFFFCF5E6), // light yellow (your palette)
+  labelStyle: TextStyle(color: FluentzColors.navy.withOpacity(0.75)),
+  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+  border: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(14),
+    borderSide: BorderSide.none,
+  ),
+  focusedBorder: OutlineInputBorder(
+    borderRadius: BorderRadius.circular(14),
+    borderSide: const BorderSide(color: Color(0xFFFCCB4E), width: 2), // hot yellow
+  ),
+);
   }
 
   Future<void> _onRegister() async {
-    FocusScope.of(context).unfocus();
+  FocusScope.of(context).unfocus();
 
-    // Basic UI validation (backend later)
-    final name = _nameCtrl.text.trim();
-    final email = _emailCtrl.text.trim();
-    final pass = _passCtrl.text;
-    final confirm = _confirmCtrl.text;
+  final name = _nameCtrl.text.trim();
+  final email = _emailCtrl.text.trim();
+  final pass = _passCtrl.text;
+  final confirm = _confirmCtrl.text;
 
-    if (name.isEmpty || email.isEmpty || pass.isEmpty || confirm.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please fill in all fields")),
-      );
-      return;
-    }
-
-    if (pass != confirm) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Passwords do not match")),
-      );
-      return;
-    }
-
-    setState(() => _loading = true);
-
-    // TODO: call backend register later
-    await Future.delayed(const Duration(milliseconds: 900));
-
-    if (!mounted) return;
-    setState(() => _loading = false);
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => OtpScreen(email: email),
-      ),
-    );
+  if (name.isEmpty || email.isEmpty || pass.isEmpty || confirm.isEmpty) {
+    showAuthError(context, "Please fill in all fields.");
+    return;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    final logoSize = (size.shortestSide * 0.18).clamp(60.0, 95.0);
+  if (!email.contains("@") || !email.contains(".")) {
+    showAuthError(context, "Please enter a valid email (example: name@gmail.com).");
+    return;
+  }
 
-    return Scaffold(
-      backgroundColor: FluentzColors.lightYellow,
-      appBar: AppBar(
-        backgroundColor: FluentzColors.lightYellow,
-        elevation: 0,
-        foregroundColor: FluentzColors.navy,
-      ),
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Center(
-                  child: Image.asset(
-                    'assets/images/fluentz_logo.png',
-                    width: logoSize,
-                    height: logoSize,
-                    fit: BoxFit.contain,
-                  ),
-                ),
-                const SizedBox(height: 12),
+  if (pass != confirm) {
+    showAuthError(context, "Passwords do not match.");
+    return;
+  }
 
-                const Text(
-                  "Create your account",
-                  style: TextStyle(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w800,
-                    color: FluentzColors.navy,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  "Join Fluentz and start learning through real conversations.",
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: FluentzColors.navy.withOpacity(0.75),
-                  ),
-                ),
+  setState(() => _loading = true);
 
-                const SizedBox(height: 22),
+  try {
+    final baseUrl = (kIsWeb) ? "http://127.0.0.1:8000" : "http://10.0.2.2:8000";
+    final url = Uri.parse("$baseUrl/auth/register");
 
-                TextField(
-                  controller: _nameCtrl,
-                  textInputAction: TextInputAction.next,
-                  autofillHints: const [AutofillHints.name],
-                  decoration: _inputDecoration(
-                    label: "Full name",
-                    icon: Icons.person_outline,
-                  ),
-                ),
+    final res = await http.post(
+      url,
+      headers: {"Content-Type": "application/json"},
+      body: jsonEncode({
+        "full_name": name,
+        "email": email,
+        "password": pass,
+      }),
+    );
 
-                const SizedBox(height: 14),
+    if (!mounted) return;
 
-                TextField(
-                  controller: _emailCtrl,
-                  keyboardType: TextInputType.emailAddress,
-                  textInputAction: TextInputAction.next,
-                  autofillHints: const [AutofillHints.email],
-                  decoration: _inputDecoration(
-                    label: "Email",
-                    icon: Icons.email_outlined,
-                  ),
-                ),
+    if (res.statusCode == 200 || res.statusCode == 201) {
+      // ✅ user created + otp generated
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Account created. OTP sent.")),
+      );
 
-                const SizedBox(height: 14),
+      // NEXT STEP: go to OTP screen (we’ll build it next)
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => OtpScreen(email: email)),
+      );
+      return;
+    }
 
-                TextField(
-                  controller: _passCtrl,
-                  obscureText: _obscurePass,
-                  textInputAction: TextInputAction.next,
-                  autofillHints: const [AutofillHints.newPassword],
-                  decoration: _inputDecoration(
-                    label: "Password",
-                    icon: Icons.lock_outline,
-                    suffix: IconButton(
-                      onPressed: () => setState(() => _obscurePass = !_obscurePass),
-                      icon: Icon(
-                        _obscurePass ? Icons.visibility : Icons.visibility_off,
-                        color: FluentzColors.navy.withOpacity(0.75),
-                      ),
-                    ),
-                  ),
-                ),
+    // readable errors
+    String msg = "Registration failed. Please try again.";
+    try {
+      final body = jsonDecode(res.body);
+      if (body is Map && body["detail"] != null) {
+        msg = body["detail"].toString();
+      }
+    } catch (_) {}
+    showAuthError(context, msg);
 
-                const SizedBox(height: 14),
+  } catch (_) {
+    if (!mounted) return;
+    showAuthError(context, "Cannot reach server. Make sure backend is running.");
+  } finally {
+    if (mounted) setState(() => _loading = false);
+  }
+}
 
-                TextField(
-                  controller: _confirmCtrl,
-                  obscureText: _obscureConfirm,
-                  textInputAction: TextInputAction.done,
-                  autofillHints: const [AutofillHints.newPassword],
-                  decoration: _inputDecoration(
-                    label: "Confirm password",
-                    icon: Icons.lock_outline,
-                    suffix: IconButton(
-                      onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
-                      icon: Icon(
-                        _obscureConfirm ? Icons.visibility : Icons.visibility_off,
-                        color: FluentzColors.navy.withOpacity(0.75),
-                      ),
-                    ),
-                  ),
-                ),
+@override
+Widget build(BuildContext context) {
+  return AuthShell(
+    title: "Create account",
+    subtitle: "Join Fluentz and start learning through real conversations.",
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _nameCtrl,
+          textInputAction: TextInputAction.next,
+          autofillHints: const [AutofillHints.name],
+          decoration: _inputDecoration(
+            label: "Full name",
+            icon: Icons.person_outline,
+          ),
+        ),
 
-                const SizedBox(height: 18),
+        const SizedBox(height: 12),
 
-                ElevatedButton(
-                  onPressed: _loading ? null : _onRegister,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: FluentzColors.navy,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: _loading
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          "Create account",
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                        ),
-                ),
+        TextField(
+          controller: _emailCtrl,
+          keyboardType: TextInputType.emailAddress,
+          textInputAction: TextInputAction.next,
+          autofillHints: const [AutofillHints.email],
+          decoration: _inputDecoration(
+            label: "Email",
+            icon: Icons.email_outlined,
+          ),
+        ),
 
-                const SizedBox(height: 14),
+        const SizedBox(height: 12),
 
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text(
-                    "Already have an account? Login",
-                    style: TextStyle(
-                      color: FluentzColors.navy,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
+        TextField(
+          controller: _passCtrl,
+          obscureText: _obscurePass,
+          textInputAction: TextInputAction.next,
+          autofillHints: const [AutofillHints.newPassword],
+          decoration: _inputDecoration(
+            label: "Password",
+            icon: Icons.lock_outline,
+            suffix: IconButton(
+              onPressed: () => setState(() => _obscurePass = !_obscurePass),
+              icon: Icon(
+                _obscurePass ? Icons.visibility : Icons.visibility_off,
+                color: FluentzColors.navy.withOpacity(0.75),
+              ),
             ),
           ),
         ),
-      ),
-    );
-  }
+
+        const SizedBox(height: 12),
+
+        TextField(
+          controller: _confirmCtrl,
+          obscureText: _obscureConfirm,
+          textInputAction: TextInputAction.done,
+          autofillHints: const [AutofillHints.newPassword],
+          decoration: _inputDecoration(
+            label: "Confirm password",
+            icon: Icons.lock_outline,
+            suffix: IconButton(
+              onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
+              icon: Icon(
+                _obscureConfirm ? Icons.visibility : Icons.visibility_off,
+                color: FluentzColors.navy.withOpacity(0.75),
+              ),
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 18),
+
+        ElevatedButton(
+          onPressed: _loading ? null : _onRegister,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: FluentzColors.navy,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            minimumSize: const Size.fromHeight(52),
+            elevation: 0,
+          ),
+          child: _loading
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Text(
+                  "Create account",
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+        ),
+
+        const SizedBox(height: 12),
+
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text(
+            "Already have an account? Login",
+            style: TextStyle(
+              color: FluentzColors.navy,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
 }

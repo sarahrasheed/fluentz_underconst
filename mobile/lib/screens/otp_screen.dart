@@ -1,232 +1,194 @@
-import 'dart:async';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'profile_setup_screen.dart';
 import '../theme/fluentz_colors.dart';
+import '../widgets/auth_shell.dart';
+import '../widgets/auth_feedback.dart';
 
 class OtpScreen extends StatefulWidget {
-  final String email; // we’ll pass it from Register later
-
   const OtpScreen({super.key, required this.email});
+  final String email;
 
   @override
   State<OtpScreen> createState() => _OtpScreenState();
 }
 
 class _OtpScreenState extends State<OtpScreen> {
-  final List<TextEditingController> _ctrls =
-      List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _nodes = List.generate(6, (_) => FocusNode());
-
+  final _otpCtrl = TextEditingController();
   bool _loading = false;
-  int _secondsLeft = 60;
-  Timer? _timer;
 
-  @override
-  void initState() {
-    super.initState();
-    _startTimer();
-  }
-
-  void _startTimer() {
-    _timer?.cancel();
-    _secondsLeft = 60;
-    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (_secondsLeft <= 1) {
-        t.cancel();
-        setState(() => _secondsLeft = 0);
-      } else {
-        setState(() => _secondsLeft--);
-      }
-    });
-  }
+  static const int _backendPort = 8000;
 
   @override
   void dispose() {
-    _timer?.cancel();
-    for (final c in _ctrls) c.dispose();
-    for (final n in _nodes) n.dispose();
+    _otpCtrl.dispose();
     super.dispose();
   }
 
-  String get _otp => _ctrls.map((c) => c.text.trim()).join();
-
-  void _onChanged(int index, String value) {
-    if (value.length > 1) {
-      // If user pasted multiple chars, keep only last char
-      _ctrls[index].text = value.substring(value.length - 1);
-      _ctrls[index].selection = TextSelection.fromPosition(
-        const TextPosition(offset: 1),
-      );
-    }
-
-    if (value.isNotEmpty && index < 5) {
-      _nodes[index + 1].requestFocus();
-    }
-
-    if (value.isEmpty && index > 0) {
-      // backspace behavior: go back
-      // (user can tap too)
-    }
+  String _baseUrl() {
+    if (kIsWeb) return "http://127.0.0.1:$_backendPort";
+    return "http://10.0.2.2:$_backendPort"; // android emulator -> host
   }
 
-  Future<void> _verify() async {
+  String _extractFastApiDetail(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded["detail"] != null) {
+        final detail = decoded["detail"];
+        if (detail is List && detail.isNotEmpty) {
+          final first = detail.first;
+          if (first is Map && first["msg"] != null) {
+            return first["msg"].toString();
+          }
+          return detail.toString();
+        }
+        return detail.toString();
+      }
+    } catch (_) {}
+    return "Invalid OTP. Please try again.";
+  }
+
+  Future<void> _verifyOtp() async {
     FocusScope.of(context).unfocus();
 
-    if (_otp.length != 6) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please enter the 6-digit code")),
-      );
+    final email = widget.email.trim();
+    final otp = _otpCtrl.text.trim();
+
+    if (email.isEmpty) {
+      showAuthError(context, "Missing email. Please register again.");
+      return;
+    }
+
+    if (otp.isEmpty) {
+      showAuthError(context, "Please enter the OTP code.");
+      return;
+    }
+
+    // Optional: keep OTP clean (digits only)
+    final digitsOnly = RegExp(r'^\d{4,8}$'); // adjust length if you want
+    if (!digitsOnly.hasMatch(otp)) {
+      showAuthError(context, "OTP must be numbers only.");
       return;
     }
 
     setState(() => _loading = true);
 
-    // TODO: connect to backend verify endpoint later
-    await Future.delayed(const Duration(milliseconds: 900));
+    try {
+      final url = Uri.parse("${_baseUrl()}/auth/verify-otp");
+      final res = await http.post(
+        url,
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "email": email,
+          "otp": otp, // ✅ string exactly like your backend example
+        }),
+      );
 
- if (!mounted) return;
-setState(() => _loading = false);
+      if (!mounted) return;
 
-Navigator.push(
-  context,
-  MaterialPageRoute(
-    builder: (_) => OtpScreen(email: email),
-  ),
-);
+      if (res.statusCode == 200) {
+        // Backend may return:
+        // {"message":"Email verified","user_id":5,"next_step":"profile_setup"}
+        // OR {"message":"Already verified","user_id":5,"next_step":"profile_setup"}
+        int? userId;
+        try {
+          final body = jsonDecode(res.body);
+          if (body is Map && body["user_id"] != null) {
+            userId = (body["user_id"] as num).toInt();
+          }
+        } catch (_) {}
 
-    // TODO: Navigate to Assessment Intro next step
-  }
+        if (userId == null) {
+          showAuthError(
+              context, "Verified, but missing user_id from server response.");
+          return;
+        }
 
-  void _resend() {
-    if (_secondsLeft > 0) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Email verified ✅")),
+        );
 
-    // TODO: call backend resend OTP later
-    _startTimer();
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("OTP resent (UI only)")),
-    );
-  }
-
-  Widget _otpBox(int i) {
-    return SizedBox(
-      width: 46,
-      height: 54,
-      child: TextField(
-        controller: _ctrls[i],
-        focusNode: _nodes[i],
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        maxLength: 1,
-        style: const TextStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-          color: FluentzColors.navy,
-        ),
-        decoration: InputDecoration(
-          counterText: "",
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding: const EdgeInsets.symmetric(vertical: 14),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ProfileSetupScreen(
+              userId: userId!,
+              email: widget.email,
+            ),
           ),
-        ),
-        onChanged: (v) => _onChanged(i, v),
-      ),
-    );
+        );
+        return;
+      }
+
+      showAuthError(context, _extractFastApiDetail(res.body));
+    } catch (_) {
+      if (!mounted) return;
+      showAuthError(
+          context, "Cannot reach server. Make sure backend is running.");
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: FluentzColors.lightYellow,
-      appBar: AppBar(
-        backgroundColor: FluentzColors.lightYellow,
-        elevation: 0,
-        foregroundColor: FluentzColors.navy,
-        title: const Text(
-          "Verify email",
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-      ),
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const SizedBox(height: 6),
-
-                Text(
-                  "We sent a 6-digit code to:",
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: FluentzColors.navy.withOpacity(0.75),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  widget.email,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: FluentzColors.navy,
-                  ),
-                ),
-
-                const SizedBox(height: 22),
-
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: List.generate(6, _otpBox),
-                ),
-
-                const SizedBox(height: 24),
-
-                ElevatedButton(
-                  onPressed: _loading ? null : _verify,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: FluentzColors.navy,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                  child: _loading
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          "Verify",
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                        ),
-                ),
-
-                const SizedBox(height: 14),
-
-                TextButton(
-                  onPressed: _secondsLeft == 0 ? _resend : null,
-                  child: Text(
-                    _secondsLeft == 0
-                        ? "Resend code"
-                        : "Resend in $_secondsLeft s",
-                    style: const TextStyle(
-                      color: FluentzColors.navy,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
+    return AuthShell(
+      title: "Verify your email",
+      subtitle: "We sent a code to ${widget.email}. Enter it below.",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _otpCtrl,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: "OTP code",
+              filled: true,
+              fillColor: const Color(0xFFFBFBFC),
+              labelStyle: TextStyle(color: FluentzColors.navy.withOpacity(0.7)),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide:
+                    BorderSide(color: FluentzColors.navy.withOpacity(0.08)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide:
+                    BorderSide(color: FluentzColors.navy.withOpacity(0.10)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: const BorderSide(
+                    color: FluentzColors.lightBlue, width: 1.6),
+              ),
             ),
           ),
-        ),
+          const SizedBox(height: 14),
+          ElevatedButton(
+            onPressed: _loading ? null : _verifyOtp,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: FluentzColors.navy,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14)),
+              elevation: 0,
+            ),
+            child: _loading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white),
+                  )
+                : const Text(
+                    "Verify",
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+          ),
+        ],
       ),
     );
   }

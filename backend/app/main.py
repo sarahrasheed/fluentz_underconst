@@ -2,26 +2,43 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 from datetime import datetime, timedelta
-from .models import LearnerProfile, UserLanguage, UserInterest, Language, Interest
-from .schemas import CompleteProfileIn
+import json
+
+# NEW for stateless assessment
+import os
+import base64
+import hmac
+import hashlib
+from pydantic import BaseModel
 
 from .db import get_db
-from .models import User, EmailOtpCode, LanguageAssessment
+from .models import (
+    User,
+    EmailOtpCode,
+    LanguageAssessment,
+    LearnerProfile,
+    UserLanguage,
+    UserInterest,
+    Language,
+    Interest,
+)
 from .schemas import (
     RegisterIn, RegisterOut,
     VerifyOtpIn, ResendOtpIn,
     LoginIn, LoginOut,
-    SubmitAssessmentIn
+    SubmitAssessmentIn,
+    CompleteProfileIn,
 )
-from .security import hash_password, verify_password, create_access_token, generate_otp, otp_hash
+
+from .security import (
+    hash_password, verify_password,
+    create_access_token,
+    generate_otp, otp_hash
+)
 from .emailer import send_otp_email
 
-import json
-from .models_assessment import AssessmentSession, AssessmentItem
 from .cefr import harder, easier, writing_score_to_cefr
-from .ai_test import make_mcq, grade_mcq, make_writing_prompt, grade_writing
-from .schemas import AiAssessmentStartIn, AiAssessmentAnswerIn, AiAssessmentWritingIn
-from .models import Language
+from .ai_test import make_mcq, make_writing_prompt, grade_writing
 
 
 app = FastAPI(title="Fluentz API")
@@ -29,10 +46,17 @@ app = FastAPI(title="Fluentz API")
 OTP_EXPIRE_MINUTES = 10
 OTP_ATTEMPTS = 5
 
+# =========================
+# Health
+# =========================
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
+# =========================
+# Auth: Register
+# =========================
 @app.post("/auth/register", response_model=RegisterOut)
 def register(payload: RegisterIn, db: Session = Depends(get_db)):
     existing = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -65,6 +89,10 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)):
     send_otp_email(user.email, otp)
     return {"user_id": int(user.id), "message": "Registered. OTP sent."}
 
+
+# =========================
+# Auth: Resend OTP
+# =========================
 @app.post("/auth/resend-otp")
 def resend_otp(payload: ResendOtpIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -84,9 +112,14 @@ def resend_otp(payload: ResendOtpIn, db: Session = Depends(get_db)):
     )
     db.add(code)
     db.commit()
+
     send_otp_email(user.email, otp)
     return {"message": "OTP resent"}
 
+
+# =========================
+# Auth: Verify OTP
+# =========================
 @app.post("/auth/verify-otp")
 def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -94,7 +127,11 @@ def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
 
     if user.is_email_verified:
-        return {"message": "Already verified"}
+        return {
+            "message": "Already verified",
+            "user_id": int(user.id),
+            "next_step": "profile_setup"
+        }
 
     otp_row = db.execute(
         select(EmailOtpCode)
@@ -123,8 +160,16 @@ def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
     user.onboarding_status = "verified"
     db.commit()
 
-    return {"message": "Email verified"}
+    return {
+        "message": "Email verified",
+        "user_id": int(user.id),
+        "next_step": "profile_setup"
+    }
 
+
+# =========================
+# Auth: Login
+# =========================
 @app.post("/auth/login", response_model=LoginOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -141,14 +186,15 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
         "onboarding_status": user.onboarding_status
     }
 
-# --- Assessment submit (simple MVP: backend trusts the frontend test result) ---
+
+# =========================
+# (Optional) Simple assessment submit (manual)
+# =========================
 @app.post("/assessment/submit")
 def submit_assessment(user_id: int, payload: SubmitAssessmentIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.onboarding_status not in ("verified", "assessed"):
-        raise HTTPException(status_code=400, detail="User must verify email first")
 
     a = LanguageAssessment(
         user_id=user.id,
@@ -159,16 +205,22 @@ def submit_assessment(user_id: int, payload: SubmitAssessmentIn, db: Session = D
     db.add(a)
     user.onboarding_status = "assessed"
     db.commit()
+
     return {"message": "Assessment saved", "status": user.onboarding_status}
 
+
+# =========================
+# Profile: Complete
+# =========================
 @app.post("/profile/complete")
 def complete_profile(payload: CompleteProfileIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.id == payload.user_id)).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if user.onboarding_status != "assessed":
-        raise HTTPException(status_code=400, detail="User must finish assessment first")
+    # ✅ Correct flow: user must be verified first (profile BEFORE assessment)
+    if user.onboarding_status not in ("verified", "profile_completed", "assessed"):
+        raise HTTPException(status_code=400, detail="User must verify email first")
 
     # Upsert learner_profile
     lp = db.execute(select(LearnerProfile).where(LearnerProfile.user_id == user.id)).scalar_one_or_none()
@@ -199,239 +251,280 @@ def complete_profile(payload: CompleteProfileIn, db: Session = Depends(get_db)):
         if lid != payload.native_language_id:
             db.add(UserLanguage(user_id=user.id, language_id=lid, type="fluent"))
 
-    # For target languages: use latest assessment level for each target language (if exists)
     for lid in payload.target_language_ids:
         if lid == payload.native_language_id:
             continue
-
-        assessment = db.execute(
-            select(LanguageAssessment)
-            .where(LanguageAssessment.user_id == user.id, LanguageAssessment.language_id == lid)
-            .order_by(desc(LanguageAssessment.created_at))
-            .limit(1)
-        ).scalar_one_or_none()
-
-        level = assessment.level if assessment else None
-
         db.add(UserLanguage(
             user_id=user.id,
             language_id=lid,
             type="target",
-            proficiency_level=level
+            proficiency_level=None
         ))
 
     # Interests
     for iid in sorted(set(payload.interest_ids)):
         db.add(UserInterest(user_id=user.id, interest_id=iid))
 
-    user.onboarding_status = "profile_completed"
-    db.commit()
+    # ✅ Only set profile_completed if not already assessed
+    if user.onboarding_status != "assessed":
+        user.onboarding_status = "profile_completed"
 
+    db.commit()
     return {"message": "Profile completed", "status": user.onboarding_status}
 
+
+# =========================
+# Meta
+# =========================
 @app.get("/meta/languages")
 def list_languages(db: Session = Depends(get_db)):
     rows = db.execute(select(Language).order_by(Language.name)).scalars().all()
     return [{"id": int(r.id), "code": r.code, "name": r.name} for r in rows]
+
 
 @app.get("/meta/interests")
 def list_interests(db: Session = Depends(get_db)):
     rows = db.execute(select(Interest).order_by(Interest.name)).scalars().all()
     return [{"id": int(r.id), "name": r.name} for r in rows]
 
+
+# ============================================================
+# ✅ AI Assessment (Option 1) — STATELESS, NO SESSION TABLES
+# ============================================================
+
 MAX_CORE_QUESTIONS = 8
+
+# Put this in your .env:
+# ASSESSMENT_SECRET=some-long-random-string
+ASSESSMENT_SECRET = os.getenv("ASSESSMENT_SECRET", "dev-secret-change-me")
+
+
+def _b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def sign_json(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    sig = hmac.new(ASSESSMENT_SECRET.encode(), raw, hashlib.sha256).digest()
+    return _b64url_encode(raw) + "." + _b64url_encode(sig)
+
+
+def verify_json(token: str) -> dict:
+    try:
+        raw_b64, sig_b64 = token.split(".")
+        raw = _b64url_decode(raw_b64)
+        sig = _b64url_decode(sig_b64)
+        expected = hmac.new(ASSESSMENT_SECRET.encode(), raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected):
+            raise ValueError("bad signature")
+        return json.loads(raw.decode())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or tampered token")
+
+
+class AiAssessmentStartIn(BaseModel):
+    user_id: int
+    language_id: int
+
+
+class AiAssessmentAnswerIn(BaseModel):
+    state_token: str
+    answer_key: str
+    choice: str
+
+
+class AiAssessmentWritingIn(BaseModel):
+    state_token: str
+    text: str
+
 
 @app.post("/assessment/ai/start")
 def ai_assessment_start(payload: AiAssessmentStartIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.id == payload.user_id)).scalar_one_or_none()
     if not user:
-        raise HTTPException(404, "User not found")
-    if user.onboarding_status != "verified":
-        raise HTTPException(400, "User must be verified first")
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.onboarding_status != "profile_completed":
+        raise HTTPException(status_code=400, detail="User must complete profile first")
 
     lang = db.execute(select(Language).where(Language.id == payload.language_id)).scalar_one_or_none()
     if not lang:
-        raise HTTPException(400, "Invalid language_id")
+        raise HTTPException(status_code=400, detail="Invalid language_id")
 
-    s = AssessmentSession(user_id=user.id, language_id=lang.id, status="in_progress", estimated_level="B1", step=0)
-    db.add(s)
-    db.commit()
-    db.refresh(s)
+    estimated = "B1"
+    step = 1
 
-    # create step 1 MCQ at estimated_level
-    q = make_mcq(lang.name, s.estimated_level)
-    item = AssessmentItem(
-        session_id=s.id,
-        step=1,
-        item_type="mcq",
-        target_cefr=s.estimated_level,
-        prompt_text=q["prompt"],
-        options_json=json.dumps(q["options"]),
-        correct_option=q["correct"]
-    )
-    db.add(item)
-    s.step = 1
-    db.commit()
+    q = make_mcq(lang.name, estimated)
+
+    state_token = sign_json({
+        "user_id": int(user.id),
+        "language_id": int(lang.id),
+        "step": step,
+        "estimated": estimated,
+        "phase": "mcq",
+        "ts": int(datetime.utcnow().timestamp())
+    })
+
+    answer_key = sign_json({
+        "user_id": int(user.id),
+        "language_id": int(lang.id),
+        "step": step,
+        "correct": q["correct"]
+    })
 
     return {
-        "session_id": int(s.id),
-        "step": 1,
-        "target_cefr": s.estimated_level,
+        "step": step,
         "type": "mcq",
-        "prompt": item.prompt_text,
-        "options": json.loads(item.options_json),
+        "target_cefr": estimated,
+        "prompt": q["prompt"],
+        "options": q["options"],
+        "state_token": state_token,
+        "answer_key": answer_key
     }
 
 
 @app.post("/assessment/ai/answer-mcq")
 def ai_assessment_answer(payload: AiAssessmentAnswerIn, db: Session = Depends(get_db)):
-    s = db.execute(select(AssessmentSession).where(AssessmentSession.id == payload.session_id)).scalar_one_or_none()
-    if not s or s.status != "in_progress":
-        raise HTTPException(400, "Invalid session")
+    state = verify_json(payload.state_token)
+    key = verify_json(payload.answer_key)
 
-    lang = db.execute(select(Language).where(Language.id == s.language_id)).scalar_one()
+    # token consistency
+    if key.get("user_id") != state.get("user_id") or key.get("language_id") != state.get("language_id") or key.get("step") != state.get("step"):
+        raise HTTPException(status_code=400, detail="Token mismatch")
 
-    item = db.execute(
-        select(AssessmentItem).where(
-            AssessmentItem.session_id == s.id,
-            AssessmentItem.step == s.step
-        )
-    ).scalar_one_or_none()
+    user_id = int(state["user_id"])
+    language_id = int(state["language_id"])
+    step = int(state["step"])
+    estimated = str(state["estimated"])
 
-    if not item or item.item_type != "mcq":
-        raise HTTPException(400, "No current MCQ item")
+    lang = db.execute(select(Language).where(Language.id == language_id)).scalar_one_or_none()
+    if not lang:
+        raise HTTPException(status_code=400, detail="Invalid language_id")
 
-    # Grade MCQ
-    q_options = json.loads(item.options_json or "{}")
-    # explanation comes from the generator; we stored none, so we’ll keep short feedback
-    correct = (item.correct_option or "").strip()
+    correct = (key.get("correct") or "").strip()
+    choice = (payload.choice or "").strip()
 
-    # quick AI-free feedback for MVP (you can improve later)
-    is_correct = payload.choice == correct
-    score = 10 if is_correct else 0
-    feedback = "Correct." if is_correct else f"Incorrect. Correct answer is {correct}."
+    is_correct = choice == correct
+    prev_feedback = "Correct ✅" if is_correct else f"Incorrect ❌. Correct answer is {correct}."
 
-    item.user_answer = payload.choice
-    item.score = score
-    item.feedback = feedback
-    item.answered_at = datetime.utcnow()
+    estimated = harder(estimated) if is_correct else easier(estimated)
+    next_step = step + 1
 
-    # Update estimated level based on performance
-    if score == 10:
-        s.estimated_level = harder(s.estimated_level)
-    else:
-        s.estimated_level = easier(s.estimated_level)
-
-    next_step = s.step + 1
-
-    # If finished core, move to writing
+    # done core -> writing prompt
     if next_step > MAX_CORE_QUESTIONS:
-        s.status = "awaiting_writing"
-        db.commit()
+        wp = make_writing_prompt(lang.name, estimated)
 
-        wp = make_writing_prompt(lang.name, s.estimated_level)
-        writing_item = AssessmentItem(
-            session_id=s.id,
-            step=9,
-            item_type="writing",
-            target_cefr=s.estimated_level,
-            prompt_text=wp["prompt"],
-            options_json=json.dumps({"min_words": wp["min_words"], "max_words": wp["max_words"]})
-        )
-        db.add(writing_item)
-        db.commit()
+        next_state_token = sign_json({
+            "user_id": user_id,
+            "language_id": language_id,
+            "step": next_step,
+            "estimated": estimated,
+            "phase": "writing",
+            "ts": int(datetime.utcnow().timestamp())
+        })
 
         return {
             "done_core": True,
-            "status": s.status,
-            "estimated_level": s.estimated_level,
             "type": "writing",
-            "prompt": writing_item.prompt_text,
-            "limits": json.loads(writing_item.options_json),
-            "prev_feedback": item.feedback
+            "target_cefr": estimated,
+            "prompt": wp["prompt"],
+            "limits": {"min_words": wp["min_words"], "max_words": wp["max_words"]},
+            "prev_feedback": prev_feedback,
+            "state_token": next_state_token
         }
 
-    # Otherwise generate next MCQ
-    q = make_mcq(lang.name, s.estimated_level)
-    next_item = AssessmentItem(
-        session_id=s.id,
-        step=next_step,
-        item_type="mcq",
-        target_cefr=s.estimated_level,
-        prompt_text=q["prompt"],
-        options_json=json.dumps(q["options"]),
-        correct_option=q["correct"]
-    )
-    db.add(next_item)
-    s.step = next_step
-    db.commit()
+    # otherwise next MCQ
+    q = make_mcq(lang.name, estimated)
+
+    next_state_token = sign_json({
+        "user_id": user_id,
+        "language_id": language_id,
+        "step": next_step,
+        "estimated": estimated,
+        "phase": "mcq",
+        "ts": int(datetime.utcnow().timestamp())
+    })
+
+    next_answer_key = sign_json({
+        "user_id": user_id,
+        "language_id": language_id,
+        "step": next_step,
+        "correct": q["correct"]
+    })
 
     return {
         "done_core": False,
         "step": next_step,
-        "target_cefr": s.estimated_level,
         "type": "mcq",
-        "prompt": next_item.prompt_text,
-        "options": json.loads(next_item.options_json),
-        "prev_feedback": item.feedback
+        "target_cefr": estimated,
+        "prompt": q["prompt"],
+        "options": q["options"],
+        "prev_feedback": prev_feedback,
+        "state_token": next_state_token,
+        "answer_key": next_answer_key
     }
 
 
 @app.post("/assessment/ai/submit-writing")
 def ai_assessment_submit_writing(payload: AiAssessmentWritingIn, db: Session = Depends(get_db)):
-    s = db.execute(select(AssessmentSession).where(AssessmentSession.id == payload.session_id)).scalar_one_or_none()
-    if not s or s.status != "awaiting_writing":
-        raise HTTPException(400, "Session not awaiting writing")
+    state = verify_json(payload.state_token)
 
-    lang = db.execute(select(Language).where(Language.id == s.language_id)).scalar_one()
+    if state.get("phase") != "writing":
+        raise HTTPException(status_code=400, detail="Not in writing phase")
 
-    writing_item = db.execute(
-        select(AssessmentItem).where(
-            AssessmentItem.session_id == s.id,
-            AssessmentItem.step == 9,
-            AssessmentItem.item_type == "writing"
-        )
-    ).scalar_one_or_none()
+    user_id = int(state["user_id"])
+    language_id = int(state["language_id"])
+    estimated = str(state["estimated"])
 
-    if not writing_item:
-        raise HTTPException(400, "Writing task not found")
+    user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    g = grade_writing(lang.name, s.estimated_level, writing_item.prompt_text, payload.text)
+    if user.onboarding_status != "profile_completed":
+        raise HTTPException(status_code=400, detail="User must complete profile first")
 
-    writing_item.user_answer = payload.text
-    writing_item.score = int(g["score"])
-    writing_item.feedback = g.get("feedback", "")
-    writing_item.answered_at = datetime.utcnow()
+    lang = db.execute(select(Language).where(Language.id == language_id)).scalar_one_or_none()
+    if not lang:
+        raise HTTPException(status_code=400, detail="Invalid language_id")
 
-    writing_level = writing_score_to_cefr(int(g["score"]))
+    # regenerate prompt (stateless)
+    wp = make_writing_prompt(lang.name, estimated)
 
-    # Final CEFR = MIN(core estimate, writing)
-    cefr_order = ["A1","A2","B1","B2","C1","C2"]
-    final_level = s.estimated_level
-    if cefr_order.index(writing_level) < cefr_order.index(final_level):
-        final_level = writing_level
+    g = grade_writing(lang.name, estimated, wp["prompt"], payload.text)
+    writing_score = int(g["score"])
+    writing_level = writing_score_to_cefr(writing_score)
 
-    # Save final result into your existing language_assessments table
+    cefr_order = ["A1", "A2", "B1", "B2", "C1", "C2"]
+    final_cefr = estimated
+    if cefr_order.index(writing_level) < cefr_order.index(final_cefr):
+        final_cefr = writing_level
+
+    # map CEFR to your enum
+    saved_level = "beginner" if final_cefr in ("A1", "A2") else ("intermediate" if final_cefr in ("B1", "B2") else "advanced")
+
+    # save final result in existing table
     db.add(LanguageAssessment(
-        user_id=s.user_id,
-        language_id=s.language_id,
-        level="beginner" if final_level in ("A1","A2") else ("intermediate" if final_level in ("B1","B2") else "advanced"),
-        score=int(g["score"])  # keep for now (0..15); we can normalize later
+        user_id=user_id,
+        language_id=language_id,
+        level=saved_level,
+        score=writing_score
     ))
 
-    user = db.execute(select(User).where(User.id == s.user_id)).scalar_one()
     user.onboarding_status = "assessed"
-
-    s.status = "completed"
-    s.completed_at = datetime.utcnow()
-
     db.commit()
 
     return {
         "message": "Assessment completed",
-        "core_estimate": s.estimated_level,
-        "writing_score": int(g["score"]),
+        "core_estimate": estimated,
+        "writing_score": writing_score,
         "writing_level": writing_level,
-        "final_cefr": final_level,
-        "user_status": user.onboarding_status
+        "final_cefr": final_cefr,
+        "saved_level": saved_level,
+        "user_status": user.onboarding_status,
+        "feedback": g.get("feedback", "")
     }
