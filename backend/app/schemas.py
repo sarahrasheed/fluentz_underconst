@@ -3,6 +3,8 @@ from typing import Literal, Optional
 from datetime import date
 from typing import List
 from typing import Literal
+from pydantic import BaseModel
+
 
 class RegisterIn(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
@@ -29,6 +31,10 @@ class LoginOut(BaseModel):
     token_type: str = "bearer"
     onboarding_status: Literal["registered","verified","assessed","profile_completed"]
     role: Literal["learner","admin"]
+    user_id: int  
+
+class MatchingRequest(BaseModel):
+    user_id: int 
 
 class SubmitAssessmentIn(BaseModel):
     language_id: int

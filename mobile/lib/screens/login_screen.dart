@@ -7,6 +7,7 @@ import '../theme/fluentz_colors.dart';
 import '../widgets/auth_shell.dart';
 import 'register_screen.dart';
 import '../widgets/auth_feedback.dart';
+import 'MatchingResultsScreen.dart';
 
 /// TEMP page after login (until Home is built)
 class AfterLoginScreen extends StatelessWidget {
@@ -137,10 +138,11 @@ class _LoginScreenState extends State<LoginScreen> {
     final password = _passCtrl.text;
 
     // ✅ ONLY change: nicer message when '@' is missing
-  if (!_looksLikeEmail(email)) {
-    showAuthError(context, "Please enter a valid email (example: name@gmail.com).");
-    return;
-  }
+    if (!_looksLikeEmail(email)) {
+      showAuthError(
+          context, "Please enter a valid email (example: name@gmail.com).");
+      return;
+    }
 
     setState(() => _loading = true);
 
@@ -164,9 +166,13 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (res.statusCode >= 200 && res.statusCode < 300) {
         if (!mounted) return;
+        final userId = (data["user_id"] as num).toInt();
+
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => AfterLoginScreen(userJson: data)),
+          MaterialPageRoute(
+            builder: (_) => MatchingResultsScreen(userId: userId),
+          ),
         );
         return;
       }
@@ -222,7 +228,8 @@ class _LoginScreenState extends State<LoginScreen> {
               onPressed: () {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const ForgotPasswordScreen()),
+                  MaterialPageRoute(
+                      builder: (_) => const ForgotPasswordScreen()),
                 );
               },
               child: const Text(

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 from datetime import datetime, timedelta
 import json
+from .matching_service import get_recommendations
 
 # NEW for stateless assessment
 import os
@@ -170,6 +171,9 @@ def verify_otp(payload: VerifyOtpIn, db: Session = Depends(get_db)):
 # =========================
 # Auth: Login
 # =========================
+# =========================
+# Auth: Login
+# =========================
 @app.post("/auth/login", response_model=LoginOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
@@ -183,9 +187,49 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "role": user.role,
-        "onboarding_status": user.onboarding_status
+        "onboarding_status": user.onboarding_status,
+        "user_id": int(user.id),   
     }
 
+from pydantic import BaseModel
+
+class MatchingRequest(BaseModel):
+    user_id: int
+
+
+@app.post("/matching/recommend")
+def matching_recommend(payload: MatchingRequest, db: Session = Depends(get_db)):
+    user_id = payload.user_id
+
+    user = db.execute(
+        select(User).where(User.id == user_id)
+    ).scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.onboarding_status not in ("profile_completed", "assessed"):
+        raise HTTPException(
+            status_code=400,
+            detail="User must complete profile first"
+        )
+
+    recommendations = get_recommendations(db, user_id=user_id, limit=20)
+
+    return {
+        "user_id": user_id,
+        "recommended_matches": [
+            {
+                "id": r["user_id"],
+                "name": r["full_name"],
+                "age": r["age"] if r["age"] is not None else "unknown",
+                "interests": r["shared_interests"],
+                "score": float(r["score"]),
+                "profile_picture": r["profile_photo_url"],
+            }
+            for r in recommendations
+        ]
+    }
 
 # =========================
 # (Optional) Simple assessment submit (manual)
